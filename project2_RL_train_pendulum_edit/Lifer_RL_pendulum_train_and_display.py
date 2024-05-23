@@ -182,6 +182,7 @@ def simulate_episode(agent_params, xml_path, model_path, render=False):
 
 if __name__ == "__main__":
     xml_path = "inverted_pendulum.xml"
+    # xml_path = "inverted_pendulum_without_limit.xml"
     model, data = init_mujoco(xml_path)
 
     # model.opt.timestep = 0.01  # 设置更大的时间步长
@@ -194,10 +195,10 @@ if __name__ == "__main__":
     agent_params = (obs_space_dims, action_space_dims)
 
     model_path = "lifer_official_model0.pth"
-    save_model_path = "lifer_official_model1.pth"
-    save_model_path = "lifer_official_model0.pth"
+    save_model_path = "lifer_model1.pth"
+    # save_model_path = "lifer_official_model0.pth"
 
-    total_num = int(200)
+    total_num = int(50)
     batch_iter = 10
     episode = 0
 
@@ -223,7 +224,7 @@ if __name__ == "__main__":
                     action, _ = agent.sample_action(state)
                     data.ctrl[0] = action
                     mujoco.mj_step(model, data)
-                    done = data.time > 20
+                    done = data.time > 300
 
                     with viewer.lock():
                         viewer.opt.flags[mujoco.mjtVisFlag.mjVIS_CONTACTPOINT] = int(data.time % 2)

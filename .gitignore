@@ -1,0 +1,10 @@
+.idea/
+
+project1_state_estimation/outputs/
+
+Final Project_SDM366.pdf
+
+*/MUJOCO_LOG.TXT
+
+*.pth
+!lifer_official_model?.pth
