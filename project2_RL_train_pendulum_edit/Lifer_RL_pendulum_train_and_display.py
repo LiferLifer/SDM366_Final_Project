@@ -170,11 +170,6 @@ if __name__ == "__main__":
     # xml_path = "inverted_pendulum_without_limit.xml"
     model, data = init_mujoco(xml_path)
 
-    # model.opt.timestep = 0.01  # 设置更大的时间步长
-    # model.opt.integrator = mujoco.mjtIntegrator.mjINT_EULER  # 使用简单的欧拉积分器
-    # model.opt.collision = 0  # 禁用碰撞检测
-    # model.opt.cone = 0  # 禁用摩擦锥
-
     obs_space_dims = model.nq
     action_space_dims = model.nu
     agent_params = (obs_space_dims, action_space_dims)
