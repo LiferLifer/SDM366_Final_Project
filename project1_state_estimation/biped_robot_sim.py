@@ -20,19 +20,31 @@
 
 
 import numpy as np
+import quaternion
 import mujoco
 import mujoco.viewer
-from scipy.spatial.transform import Rotation as R
+from scipy.spatial.transform import Rotation as Rot
 import torch
 import os
 import time
 import hydra
 from omegaconf import DictConfig
+import pinocchio as pin
+from pinocchio.robot_wrapper import RobotWrapper
 
 # Set the directory for the simulation environment's source code
-SOURCE_DIR = r"..\project1_state_estimation"
+SOURCE_DIR = (
+    ""  # TODO: change to your own project dir
+)
+
+urdf_path = "xiaotian/urdf/xiaotian.urdf"  # 替换为你的URDF文件路径
+package_dirs = "xiaotian/meshes"
+robot = RobotWrapper.BuildFromURDF(urdf_path, package_dirs=package_dirs, root_joint=pin.JointModelFreeFlyer())
+# 初始化配置
 # Flag to indicate whether to use the simulation environment
-USE_SIM = True  # TODO: you should change to False to implement your own state estimator
+USE_SIM = False  # TODO: you should change to False to implement your own state estimator
+
+timestep = 0.001
 
 
 class MuJoCoSim:
@@ -49,7 +61,7 @@ class MuJoCoSim:
 
         # Load the MuJoCo model
         self.model = mujoco.MjModel.from_xml_path(
-            os.path.join(SOURCE_DIR, "xiaotian/urdf/xiaotian.xml")
+            "xiaotian/urdf/xiaotian.xml"
         )
         self.model.opt.timestep = 0.001
 
@@ -80,6 +92,24 @@ class MuJoCoSim:
         self.commands[2] = 0.0  # yaw angular velocity
         self.commands[3] = 0.625  # base height
 
+        # 自定义变量
+        self.last_quaternion = np.quaternion(1, 0, 0, 0)
+        self.lastBPL = np.zeros(3)
+        self.lastBPR = np.zeros(3)
+        self.x = np.array([0, 0, 0.625, 0, 0, 0, -0.0696, 0.095, 0, -0.0696, -0.095, 0]).T
+        self.P = np.eye(12) * 0.01
+        self.EKF_Q = np.eye(12)
+        self.EKF_Q[:3, :3] = np.eye(3) * timestep * 0.02 / 20
+        self.EKF_Q[3:6, 3:6] = np.eye(3) * timestep * 0.02 * 9.8 / 20
+        self.EKF_Q[6:9, 6:9] = np.eye(3) * timestep * 0.02
+        self.EKF_Q[9:12, 9:12] = np.eye(3) * timestep * 0.02
+
+        self.EKF_R = np.zeros((14, 14))
+        self.EKF_R[:6, :6] = np.eye(6) * 0.01
+        self.EKF_R[6:12, 6:12] = np.eye(6) * 0.01
+        self.EKF_R[12:14, 12:14] = np.eye(2) * 0.01
+        self.W = np.zeros([3])
+
     def get_joint_state(self):
         """Retrieve the joint position and velocity states."""
         q_ = self.data.qpos.astype(np.double)
@@ -89,8 +119,8 @@ class MuJoCoSim:
     def get_base_state(self):
         """Get the base state including linear velocity, angular velocity, and projected gravity."""
         quat = self.data.sensor("imu_quat").data[[1, 2, 3, 0]].astype(np.double)
-        r = R.from_quat(quat)
-        base_lin_vel = r.apply(self.estimate_base_lin_vel(), inverse=True).astype(
+        r = Rot.from_quat(quat)
+        base_lin_vel = r.apply(self.estimate_base_lin_vel(), inverse=True).astype(  #
             np.double
         )
         base_ang_vel = self.data.qvel[3:6].astype(np.double)
@@ -113,11 +143,11 @@ class MuJoCoSim:
                 right_contact = 1
         return np.array([left_contact, right_contact])
 
-    def compute_obs(self):
+    def compute_obs(self):  #
         """Calculate and return the observed states from the policy input."""
         obs_scales = self.cfg.observation.normalization
         dof_pos, dof_vel = self.get_joint_state()
-        base_lin_vel, base_ang_vel, projected_gravity = self.get_base_state()
+        base_lin_vel, base_ang_vel, projected_gravity = self.get_base_state()  #
         CommandScaler = np.array(
             [
                 obs_scales.lin_vel,
@@ -160,9 +190,9 @@ class MuJoCoSim:
         target_q = np.zeros(self.cfg.num_actions, dtype=np.double)
         while self.data.time < 1000.0 and self.viewer.is_running():
             step_start = time.time()
-
+            proprioception_obs = self.compute_obs()  #
             if self.iter_ % self.decimation == 0:
-                proprioception_obs = self.compute_obs()
+                # proprioception_obs = self.compute_obs() #
                 action = (
                     self.policy(torch.tensor(proprioception_obs))[0].detach().numpy()
                 )
@@ -178,7 +208,7 @@ class MuJoCoSim:
 
             mujoco.mj_step(self.model, self.data)
 
-            if self.iter_ % 10 == 0:  # 50Hz
+            if self.iter_ % 1 == 0:  # 50Hz 10
                 self.viewer.sync()
 
             self.iter_ += 1
@@ -188,31 +218,142 @@ class MuJoCoSim:
 
     def estimate_base_lin_vel(self):
         """Estimate the base linear velocity."""
-        
         # Information you might need for doing state estimation
         contact_info = (
             self.get_contact()
         )  # [left_c, right_c] 1 is contact, 0 is off-ground
+        # print(f'contact_info:{contact_info}')
         qpos_, qvel_ = (
             self.get_joint_state()
-        )  # [left_abad, left_hip, left_knee, right_abad, right_hip, right_knee]
-        ang_acc, lin_acc = self.data.sensor("imu_gyro"), self.data.sensor("imu_acc")
+        )  # [left_abad, left_hip, left_knee, right_abad, right_hip, right_knee] 
 
+        ang_vel, lin_acc = self.data.sensor("imu_gyro"), self.data.sensor("imu_acc")
+
+        # 得到在Body坐标系下的左右脚的位置
+        BPL, BPR, BVL, BVR = z2x_getFootPosition(qpos_[:3], qpos_[3:6], qvel_[:3], qvel_[3:6], contact_info)
+        quat = quaternion.from_float_array(self.data.qpos.astype(np.double)[3:7])
+        z, rotation_ob = z2x_Obserbation(BPL, BPR, BVL, BVR, ang_vel.data, quat, contact_info)
+        # 加速度从自身坐标系变换到世界坐标系
+        a = rotation_ob @ lin_acc.data + np.array([0, 0, -9.81])
+        self.x, self.P = z2x_EKF(self.x, z, self.P, a, self.EKF_Q, self.EKF_R, contact_info)
+        self.lastBPL, self.lastBPR = BPL, BPR
+        # print('[debug] 机器人全局测量位置', self.x[:3])
+        # print(['[debug] 机器人全局真实位置', self.data.qpos[:3]])
         if USE_SIM:
             return self.data.qvel[:3]
         else:
-            return np.zeros(
-                3
-            )  # TODO: implement your codes to estimate base linear velocity
+            return self.x[3:6]  # TODO: implement your codes to estimate base linear velocity
+
+
+def z2x_EKF(x, z, P, u, Q, R, contact_info):
+    # R 是测量协方差， Q是过程预测协方差，当处于摆动状态时，需要增大Q的方差，告诉模型现在过程不准
+    if contact_info[0] == 0:
+        Q[6:9, 6:9] = np.eye(3) * timestep * 1e10 * 0.02 / 20
+        R[0:3, 0:3] = np.eye(3) * 0.01 * 1e10
+        R[6:9, 6:9] = np.eye(3) * 0.01 * 1e10
+        R[12, 12] = np.eye(1) * 0.01 * 1e10
+        Q[9:12, 9:12] = np.eye(3) * timestep * 0.02 / 20
+        R[3:6, 3:6] = np.eye(3) * 0.01
+        R[9:12, 9:12] = np.eye(3) * 0.01
+        R[13, 13] = np.eye(1) * 0.01
+    if contact_info[1] == 0:
+        Q[9:12, 9:12] = np.eye(3) * timestep * 1e10 * 0.02 / 20
+        R[3:6, 3:6] = np.eye(3) * 0.01 * 1e10
+        R[9:12, 9:12] = np.eye(3) * 0.01 * 1e10
+        R[13, 13] = np.eye(1) * 0.01 * 1e10
+        Q[6:9, 6:9] = np.eye(3) * timestep * 0.02 / 20
+        R[0:3, 0:3] = np.eye(3) * 0.01
+        R[6:9, 6:9] = np.eye(3) * 0.01
+        R[12, 12] = np.eye(1) * 0.01
+    R = R * 1e10
+
+    A = np.eye(12)
+    A[0:3, 3:6] = np.eye(3) * timestep
+    B = np.zeros([12, 3])
+    B[3:6, :] = np.eye(3) * timestep
+    global z2x_x, z2x_v
+    z2x_x = 0
+    z2x_v = 0
+    z2x_v += u[0] * timestep
+    z2x_x += z2x_v * timestep
+    x_hat = A @ x + B @ u
+    P_hat = A @ P @ A.T + Q
+    H = np.vstack((
+        np.hstack((np.eye(3), np.zeros([3, 3]), -np.eye(3), np.zeros([3, 3]))),
+        np.hstack((np.eye(3), np.zeros([3, 3]), np.zeros([3, 3]), -np.eye(3))),
+        np.hstack((np.zeros([3, 3]), np.eye(3), np.zeros([3, 3]), np.zeros([3, 3]))),
+        np.hstack((np.zeros([3, 3]), np.eye(3), np.zeros([3, 3]), np.zeros([3, 3]))),
+        np.hstack((np.zeros([1, 8]), np.array([[1]]), np.zeros([1, 3]))),
+        np.hstack((np.zeros([1, 11]), np.array([[1]])))
+    ))
+    K = P_hat @ H.T @ np.linalg.inv(H @ P_hat @ H.T + R)
+    x = x_hat + K @ (z - H @ x_hat)
+    P = (np.eye(12) - K @ H) @ P_hat
+    return x, P
+
+
+def z2x_Obserbation(BPL, BPR, BVL, BVR, W, quat, contact_info):
+    matrix_q = quaternion.as_rotation_matrix(quat)
+    z = np.concatenate((-matrix_q @ BPL,
+                        -matrix_q @ BPR,  # error?
+                        -matrix_q @ (np.cross(W, BPL) + BVL),
+                        -matrix_q @ (np.cross(W, BPR) + BVR),
+                        np.array([0.037062]),
+                        np.array([0.037062])
+                        ), axis=0)
+    return z, matrix_q
+
+
+def z2x_getFootPosition(leftP, rightP, leftV, rightV, contact):
+    """
+    得到在Body坐标系下的左右脚的位置和速度
+    """
+
+    qpos = np.zeros(robot.model.nq)
+    qvel = np.zeros(robot.model.nv)
+
+    qpos[:3] = leftP
+    qpos[7:10] = rightP
+    qvel[:3] = leftV
+    qvel[7:10] = rightV
+
+    # 计算正运动学和雅可比矩阵
+    pin.forwardKinematics(robot.model, robot.data, qpos, qvel)
+    pin.updateFramePlacements(robot.model, robot.data)
+
+    foot_L_id = robot.model.getFrameId("foot_L")
+    foot_R_id = robot.model.getFrameId("foot_R")
+
+    foot_L_to_base = robot.data.oMf[foot_L_id]  # 从base_Link到foot_L的转换矩阵
+    foot_R_to_base = robot.data.oMf[foot_R_id]  # 从base_Link到foot_R的转换矩阵
+
+    # 计算Jacobian矩阵
+    J_foot_L = pin.computeFrameJacobian(robot.model, robot.data, qpos, foot_L_id, pin.LOCAL)
+    J_foot_R = pin.computeFrameJacobian(robot.model, robot.data, qpos, foot_R_id, pin.LOCAL)
+
+    # 提取左右脚的速度
+    v_foot_L = J_foot_L[:3, :] @ qvel  # 提取线速度部分
+    v_foot_R = J_foot_R[:3, :] @ qvel  # 提取线速度部分
+
+    foot_L_pos_body = foot_L_to_base.translation
+    foot_L_pos_body = np.array([-foot_L_pos_body[1], -foot_L_pos_body[0], foot_L_pos_body[2]])
+    foot_R_pos_body = foot_R_to_base.translation
+    foot_R_pos_body = np.array([foot_R_pos_body[1], foot_R_pos_body[0], foot_R_pos_body[2]])
+    v_foot_L_body = foot_L_to_base.rotation @ v_foot_L
+    v_foot_L_body = np.array([v_foot_L_body[1], v_foot_L_body[0], v_foot_L_body[2]])
+    v_foot_R_body = foot_R_to_base.rotation @ v_foot_R
+    v_foot_R_body = np.array([v_foot_R_body[1], v_foot_R_body[0], v_foot_R_body[2]])
+    # 输出结果是[3,]维度
+    return foot_L_pos_body, foot_R_pos_body, v_foot_L_body, v_foot_R_body
 
 
 @hydra.main(
     version_base=None,
     config_name="xiaotian_config",
-    config_path=os.path.join(SOURCE_DIR, "cfg"),
+    config_path="cfg",
 )
 def main(cfg: DictConfig) -> None:
-    policy_plan_path = os.path.join(SOURCE_DIR, "policy/policy.pt")
+    policy_plan_path = "policy/policy.pt"
     policy_plan = torch.jit.load(policy_plan_path)
     sim = MuJoCoSim(cfg.env, policy_plan)
     sim.run()

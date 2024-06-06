@@ -16,7 +16,7 @@ class Agent:
     collected rewards.
     """
 
-    def __init__(self, obs_space_dims: int, action_space_dims: int, lr: float = 1e-3):
+    def __init__(self, obs_space_dims: int, action_space_dims: int, lr: float = 1e-4):
         """Initializes the agent with a neural network policy.
 
         Args:
@@ -127,26 +127,6 @@ def init_mujoco(model_path):
     return mujoco_model, mujoco_data
 
 
-# def simulate_episode(agent, model, data, render=False):
-#     rewards = []
-#     log_probs = []
-#     done = False
-#     data.time = 0
-#     mujoco.mj_resetData(model, data)
-#
-#     while not done:
-#         state = data.qpos
-#         action, log_prob = agent.sample_action(state)
-#         data.ctrl[0] = action
-#         mujoco.mj_step(model, data)
-#         reward = - (data.qpos[1] ** 2 + 0.1 * data.qvel[1] ** 2 + 0.001 * action ** 2)
-#         rewards.append(reward)
-#         log_probs.append(log_prob)
-#         done = data.time > 3
-#
-#     return rewards, log_probs
-
-
 def init_mujoco_thread_safe(model_path):
     """Initialize MuJoCo model and data for each thread to avoid shared resource conflicts."""
     mujoco_model = mujoco.MjModel.from_xml_path(model_path)
@@ -165,13 +145,18 @@ def simulate_episode(agent_params, xml_path, model_path, render=False):
     done = False
     data.time = 0
     mujoco.mj_resetData(model, data)
+    # 随机生成一个介于-0.1到0.1之间的初始角度
+    initial = np.random.uniform(-0.01, 0.01)
+    # 设置摆杆的初始角度
+    data.qpos[1] = initial
 
     while not done:
         state = data.qpos
         action, log_prob = agent.sample_action(state)
         data.ctrl[0] = action
         mujoco.mj_step(model, data)
-        reward = - (data.qpos[1] ** 2 * data.qvel[1] ** 2)
+        reward = - (data.qpos[1] ** 2 * data.qvel[1] ** 2)  # TODO: refine reward function
+        reward = - (data.qpos[1] ** 2 + 0.1 * data.qvel[1] ** 2 + 0.001 * (data.ctrl[0] ** 2))
         rewards.append(reward)
         log_probs.append(log_prob)
         done = data.time > 20
@@ -194,28 +179,35 @@ if __name__ == "__main__":
     action_space_dims = model.nu
     agent_params = (obs_space_dims, action_space_dims)
 
-    model_path = "lifer_official_model0.pth"
-    save_model_path = "lifer_model1.pth"
-    # save_model_path = "lifer_official_model0.pth"
+    # model_path = "lifer_official_model0.pth"
+    model_path = "lifer_model1.pth"
+    save_model_path = "lifer_model2.pth"
 
-    total_num = int(50)
+    show_model_path = save_model_path
+    # show_model_path = "lifer_official_model0.pth"
+
+    total_num = int(200)
     batch_iter = 10
     episode = 0
 
     visualize_num = 5
 
     visualize = True  # 控制是否可视化展示训练成果
-    # visualize = False
+    # visualize = False  # 解除注释，即刻训练！
 
     if visualize:
         # 使用MuJoCo的viewer进行可视化
         agent = Agent(*agent_params)
-        load_model(agent.policy_network, save_model_path)
+        load_model(agent.policy_network, show_model_path)
 
         with mujoco.viewer.launch_passive(model, data) as viewer:
             while viewer.is_running() and episode < visualize_num:
                 # 重置环境到初始状态
                 mujoco.mj_resetData(model, data)
+                # 随机生成一个介于-0.1到0.1之间的初始角度
+                initial_angle = np.random.uniform(-0.01, 0.01)
+                # 设置摆杆的初始角度
+                data.qpos[1] = initial_angle
                 done = False
 
                 while not done:
