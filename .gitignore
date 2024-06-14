@@ -3,6 +3,9 @@
 project1_state_estimation/outputs/
 project1_state_estimation_example/outputs/
 
+project2_RL_train_swing_pendulum/outputs/
+project2_RL_train_swing_pendulum/outputs_v*/
+
 Final Project_SDM366.pdf
 
 */MUJOCO_LOG.TXT
