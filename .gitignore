@@ -5,10 +5,13 @@ project1_state_estimation_example/outputs/
 
 project2_RL_train_swing_pendulum/outputs/
 project2_RL_train_swing_pendulum/outputs_v*/
+project2_RL_train_swing_d_p_catch/outputs/
+project2_RL_train_swing_d_p_throw/outputs/
 
-Final Project_SDM366.pdf
+media/
 
 */MUJOCO_LOG.TXT
 
+*.pdf
 *.pth
 !lifer_official_model?.pth
